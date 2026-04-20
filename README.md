@@ -27,6 +27,7 @@ Die API muss gestartet und erreichbar sein, bevor der Bot verbunden werden kann.
 - **Tages-Digest** — morgens eine Zusammenfassung im Status-Kanal
 - **Erinnerungen** — DM-Erinnerungen vor Klausuren und Hausaufgaben-Abgaben
 - **Stundenplan-Änderungs-DMs** — sofortige Benachrichtigung bei Ausfall oder Vertretung
+- **Login-Rolle** — optionale Discord-Rolle wird beim Login automatisch vergeben und beim Logout wieder entfernt
 - **Admin-Befehle** — Nutzerverwaltung, Sync-Übersicht und Cache-Steuerung direkt aus Discord
 
 ---
@@ -79,6 +80,7 @@ python -m schulmanager_discord_bot
 | `SM_DISCORD_CATEGORY_PREFIX` | Präfix für private Nutzer-Kategorien | `schulmanager` |
 | `SM_DISCORD_DIGEST_TIME` | Uhrzeit für den Tages-Digest (HH:MM) | `07:00` |
 | `SM_DISCORD_DIGEST_ENABLED` | Tages-Digest aktivieren | `true` |
+| `SM_DISCORD_LOGGED_IN_ROLE_ID` | Rolle die bei Login vergeben / bei Logout entfernt wird | *(leer)* |
 | `SM_LOG_LEVEL` | Log-Level (`INFO`, `DEBUG`, ...) | `INFO` |
 
 Vollständige Liste: `.env.example`

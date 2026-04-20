@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     discord_category_prefix: str = "schulmanager"
     discord_digest_time: str = "07:00"
     discord_digest_enabled: bool = True
+    discord_logged_in_role_id: int | None = None
 
     log_format: str = "text"
     log_level: str = "INFO"

@@ -196,6 +196,7 @@ class SchulmanagerCog(commands.Cog):
             last_digest_date=None,
         )
         await self.store.upsert_user(state)
+        await self._manage_logged_in_role(interaction.guild, interaction.user.id, add=True)
         await self._sync_user(state, reason="initial", force_refresh=True)
 
         category_mention = f"<#{workspace['status']}>"
@@ -237,6 +238,7 @@ class SchulmanagerCog(commands.Cog):
                 await category.delete(reason="Schulmanager logout")
 
         await self.store.delete_user(interaction.guild.id, interaction.user.id)
+        await self._manage_logged_in_role(interaction.guild, interaction.user.id, add=False)
         await interaction.followup.send("✅ Abgemeldet.", ephemeral=True)
 
     @app_commands.command(name="sync", description="Manuelle Aktualisierung auslösen")
@@ -879,6 +881,9 @@ class SchulmanagerCog(commands.Cog):
                     last_error=None,
                 )
                 await self.store.upsert_user(updated)
+                guild = self.bot.get_guild(state.guild_id)
+                if guild:
+                    await self._manage_logged_in_role(guild, state.user_id, add=True)
                 LOGGER.info(
                     "Startup relogin erfolgreich für guild=%s user=%s",
                     state.guild_id, state.user_id,
@@ -1967,6 +1972,26 @@ class SchulmanagerCog(commands.Cog):
         view = discord.ui.View(timeout=None)
         view.add_item(discord.ui.Button(label=item.button_label or "Oeffnen", url=item.button_url))
         return view
+
+    async def _manage_logged_in_role(self, guild: discord.Guild, user_id: int, *, add: bool) -> None:
+        role_id = self.settings.discord_logged_in_role_id
+        if not role_id:
+            return
+        role = guild.get_role(role_id)
+        if role is None:
+            LOGGER.warning("Logged-in role %s not found in guild %s", role_id, guild.id)
+            return
+        try:
+            member = guild.get_member(user_id) or await guild.fetch_member(user_id)
+        except discord.NotFound:
+            return
+        try:
+            if add:
+                await member.add_roles(role, reason="Schulmanager login")
+            else:
+                await member.remove_roles(role, reason="Schulmanager logout")
+        except discord.Forbidden:
+            LOGGER.warning("Missing permission to manage logged-in role %s in guild %s", role_id, guild.id)
 
     async def _ensure_workspace(
         self,
