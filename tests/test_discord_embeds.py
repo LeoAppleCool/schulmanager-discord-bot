@@ -4,6 +4,8 @@ from schulmanager_discord_bot.embeds import (
     render_events,
     render_grades,
     render_homework,
+    render_letters,
+    render_messages,
     render_schedule_feed,
     render_schedule_week,
 )
@@ -278,3 +280,54 @@ def test_render_events() -> None:
     rendered = render_events(events, "Europe/Berlin")
     assert len(rendered) == 1
     assert rendered[0].key == "ev1"
+
+
+def test_render_letters() -> None:
+    now = datetime.now(timezone.utc)
+    letters = [
+        {
+            "id": "l1",
+            "title": "Klassenfahrt",
+            "date": now.isoformat(),
+            "read": False,
+            "sender": "Klassenleitung",
+            "requires_confirmation": True,
+            "attachment_count": 2,
+        },
+        {
+            "id": "l2",
+            "title": "Info",
+            "date": (now - timedelta(days=3)).isoformat(),
+            "read": True,
+            "requires_confirmation": False,
+            "attachment_count": 0,
+        },
+    ]
+    rendered = render_letters(letters, "Europe/Berlin")
+    assert {item.key for item in rendered} == {"l1", "l2"}
+    # Newest first
+    assert rendered[0].key == "l1"
+    unread = next(item for item in rendered if item.key == "l1")
+    assert "Bestätigung erforderlich" in (unread.embed.description or "")
+
+
+def test_render_letters_empty() -> None:
+    assert render_letters([], "Europe/Berlin") == []
+
+
+def test_render_messages_shows_unread_count() -> None:
+    now = datetime.now(timezone.utc)
+    messages = [
+        {
+            "id": "sub1",
+            "sender": "Frau Adler",
+            "subject": "Ausflug",
+            "body_preview": "",
+            "date": now.isoformat(),
+            "read": False,
+            "unread_count": 3,
+        }
+    ]
+    rendered = render_messages(messages, "Europe/Berlin")
+    assert len(rendered) == 1
+    assert "(3 neu)" in (rendered[0].embed.title or "")

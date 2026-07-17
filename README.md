@@ -21,11 +21,12 @@ Die API muss gestartet und erreichbar sein, bevor der Bot verbunden werden kann.
 
 ## Features
 
-- **Private Kanäle pro Nutzer** — automatisch erstellte Kategorie mit 9 Kanälen (Stundenplan, Hausaufgaben, Noten, Termine, Fehlzeiten, Nachrichten, Webhook-Log, ...)
-- **Automatischer Sync** im konfigurierbaren Intervall (Standard: alle 120 Sekunden)
-- **Hausaufgaben-Reaktionen** — ✅ auf eine Nachricht reagieren markiert die Aufgabe als erledigt (wird an die API übermittelt)
-- **Tages-Digest** — morgens eine Zusammenfassung im Status-Kanal
-- **Erinnerungen** — DM-Erinnerungen vor Klausuren und Hausaufgaben-Abgaben
+- **Private Kanäle pro Nutzer** — automatisch erstellte Kategorie mit 10 Kanälen (Stundenplan, Hausaufgaben, Noten, Termine, Fehlzeiten, Nachrichten, Elternbriefe, Webhook-Log, ...)
+- **Elternbriefe** — eigener Kanal mit Lesestatus + DM-Hinweis bei bestätigungspflichtigen Briefen
+- **Automatischer Sync** im konfigurierbaren Intervall (Standard: alle 120 Sekunden), alle Datenquellen werden **parallel** abgerufen; ein einzelner fehlerhafter Endpoint blockiert den Sync nicht
+- **Hausaufgaben-Reaktionen** — ✅ auf eine Nachricht reagieren markiert die Aufgabe (lokal) als erledigt
+- **Tages-Digest** — morgens eine Zusammenfassung im Status-Kanal (holt auch bei Ausfallzeit nach)
+- **Erinnerungen** — DM-Erinnerungen vor Klausuren und Hausaufgaben-Abgaben (in Schul-Zeitzone)
 - **Stundenplan-Änderungs-DMs** — sofortige Benachrichtigung bei Ausfall oder Vertretung
 - **Login-Rolle** — optionale Discord-Rolle wird beim Login automatisch vergeben und beim Logout wieder entfernt
 - **Admin-Befehle** — Nutzerverwaltung, Sync-Übersicht und Cache-Steuerung direkt aus Discord
@@ -106,6 +107,7 @@ Vollständige Liste: `.env.example`
 | `/remind off <type>` | Erinnerung deaktivieren |
 | `/notify schedule-changes <on/off>` | DM bei Stundenplan-Änderungen |
 | `/notify digest <on/off>` | Tages-Digest aktivieren/deaktivieren |
+| `/notify letters <on/off>` | DM bei neuen bestätigungspflichtigen Elternbriefen |
 | `/notify status` | Benachrichtigungs-Einstellungen anzeigen |
 | `/debug-state` | Debug-Infos für den eigenen Account |
 | `/debug-webhook` | Test-Nachricht in den Webhook-Kanal senden |
@@ -138,7 +140,8 @@ Pro Nutzer wird automatisch eine private Kategorie mit folgenden Kanälen erstel
 | `05-events` | Schultermine + „Nächstes Event"-Panel |
 | `06-webhooks` | Änderungslog nach jedem Sync |
 | `07-absences` | Fehlzeiten-Übersicht |
-| `08-messages` | Schulnachrichten / Posteingang |
+| `08-messages` | Messenger-Konversationen (mit Ungelesen-Zähler) |
+| `09-letters` | Elternbriefe mit Lesestatus & Bestätigungshinweis |
 
 ---
 

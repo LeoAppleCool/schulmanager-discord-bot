@@ -197,6 +197,37 @@ class SchulmanagerApiClient:
         )
         return payload if isinstance(payload, list) else []
 
+    async def get_letters(
+        self,
+        access_token: str,
+        student_id: str,
+        *,
+        force_refresh: bool = True,
+    ) -> list[dict[str, Any]]:
+        payload = await self._request_json(
+            "GET",
+            f"/students/{student_id}/letters",
+            access_token=access_token,
+            params={"force_refresh": str(force_refresh).lower()},
+        )
+        return payload if isinstance(payload, list) else []
+
+    async def get_message_thread(
+        self,
+        access_token: str,
+        student_id: str,
+        subscription_id: str,
+        *,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        payload = await self._request_json(
+            "GET",
+            f"/students/{student_id}/messages/{subscription_id}",
+            access_token=access_token,
+            params={"force_refresh": str(force_refresh).lower()},
+        )
+        return payload if isinstance(payload, dict) else {}
+
     async def get_calendar_ics(
         self,
         access_token: str,

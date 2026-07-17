@@ -26,6 +26,7 @@ class UserWorkspaceState:
     webhooks_channel_id: int | None
     absences_channel_id: int | None
     messages_channel_id: int | None
+    letters_channel_id: int | None
     active: bool
     last_sync_ts: int
     last_error: str | None

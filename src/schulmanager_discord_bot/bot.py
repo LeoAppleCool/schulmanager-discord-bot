@@ -17,6 +17,7 @@ from schulmanager_discord_bot.config import Settings
 from schulmanager_discord_bot.api_client import ApiClientError, LoginResponse, SchulmanagerApiClient
 from schulmanager_discord_bot.embeds import (
     RenderedEmbed,
+    _clip,
     _fingerprint,
     compact_rendered,
     render_absences,
@@ -25,6 +26,7 @@ from schulmanager_discord_bot.embeds import (
     render_grades,
     render_homework,
     render_homework_item,
+    render_letters,
     render_messages,
     render_schedule_feed,
     render_schedule_week,
@@ -45,6 +47,7 @@ CHANNEL_SPECS: list[tuple[str, str]] = [
     ("webhooks", "06-webhooks"),
     ("absences", "07-absences"),
     ("messages", "08-messages"),
+    ("letters", "09-letters"),
 ]
 
 CHANNEL_KIND_TO_FIELD: dict[str, str] = {
@@ -57,6 +60,7 @@ CHANNEL_KIND_TO_FIELD: dict[str, str] = {
     "webhooks": "webhooks_channel_id",
     "absences": "absences_channel_id",
     "messages": "messages_channel_id",
+    "letters": "letters_channel_id",
 }
 
 EVENTS_PANEL_KIND = "events_panel"
@@ -190,6 +194,7 @@ class SchulmanagerCog(commands.Cog):
             webhooks_channel_id=workspace["webhooks"],
             absences_channel_id=workspace["absences"],
             messages_channel_id=workspace["messages"],
+            letters_channel_id=workspace["letters"],
             active=True,
             last_sync_ts=0,
             last_error=None,
@@ -420,6 +425,15 @@ class SchulmanagerCog(commands.Cog):
     async def notify_digest(self, interaction: discord.Interaction, enabled: int) -> None:
         await self._set_notification_pref(interaction, "digest", bool(enabled))
 
+    @notify_group.command(name="letters", description="DM bei neuen Elternbriefen mit Bestätigungspflicht")
+    @app_commands.describe(enabled="An oder Aus")
+    @app_commands.choices(enabled=[
+        app_commands.Choice(name="An", value=1),
+        app_commands.Choice(name="Aus", value=0),
+    ])
+    async def notify_letters(self, interaction: discord.Interaction, enabled: int) -> None:
+        await self._set_notification_pref(interaction, "letters", bool(enabled))
+
     @notify_group.command(name="status", description="Aktuelle Benachrichtigungs-Einstellungen anzeigen")
     async def notify_status(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or interaction.user is None:
@@ -431,8 +445,8 @@ class SchulmanagerCog(commands.Cog):
             return
         prefs = await self.store.list_notification_prefs(interaction.guild.id, interaction.user.id)
         embed = discord.Embed(title="🔔 Benachrichtigungs-Einstellungen", color=discord.Color.blurple(), timestamp=datetime.now(timezone.utc))
-        defaults = {"schedule_changes": True, "digest": True}
-        labels = {"schedule_changes": "Stundenplan-Änderungen", "digest": "Tages-Digest"}
+        defaults = {"schedule_changes": True, "digest": True, "letters": True}
+        labels = {"schedule_changes": "Stundenplan-Änderungen", "digest": "Tages-Digest", "letters": "Elternbriefe (Bestätigung)"}
         for key, default in defaults.items():
             val = prefs.get(key, default)
             embed.add_field(name=labels.get(key, key), value="✅ An" if val else "❌ Aus", inline=True)
@@ -495,6 +509,7 @@ class SchulmanagerCog(commands.Cog):
             ("webhooks", state.webhooks_channel_id),
             ("absences", state.absences_channel_id),
             ("messages", state.messages_channel_id),
+            ("letters", state.letters_channel_id),
         ]
         lines = [f"Kategorie: <#{state.category_id}>" if state.category_id else "Kategorie: -"]
         lines.extend(f"{name}: <#{channel_id}>" if channel_id else f"{name}: -" for name, channel_id in channel_items)
@@ -811,7 +826,7 @@ class SchulmanagerCog(commands.Cog):
             homework_raw = await self.api.get_homework(state.access_token, state.student_id, open_only=False, force_refresh=False)
             schedule_raw = await self.api.get_schedule(state.access_token, state.student_id, today, to_date, force_refresh=False)
 
-            item = next((hw for hw in homework_raw if hw.get("id") == record.item_key), None)
+            item = next((hw for hw in homework_raw if str(hw.get("id")) == record.item_key), None)
             if item is None:
                 return
 
@@ -915,6 +930,10 @@ class SchulmanagerCog(commands.Cog):
     @reminder_loop.before_loop
     async def before_reminder_loop(self) -> None:
         await self.bot.wait_until_ready()
+        try:
+            await self.store.purge_old_dedup(90)
+        except Exception as exc:  # pragma: no cover - best-effort maintenance
+            LOGGER.warning("Dedup purge on startup failed: %s", exc)
 
     @tasks.loop(minutes=30)
     async def digest_loop(self) -> None:
@@ -928,9 +947,10 @@ class SchulmanagerCog(commands.Cog):
         except (ValueError, AttributeError):
             digest_hour, digest_minute = 7, 0
 
-        if now.hour != digest_hour or not (0 <= now.minute < 30 and digest_minute < 30) and not (30 <= now.minute and digest_minute >= 30):
-            if now.hour != digest_hour or abs(now.minute - digest_minute) > 30:
-                return
+        # Fire once per day, at or after the configured time. The per-user last_digest_date guard
+        # below prevents duplicates and lets a missed window (bot downtime) catch up the same day.
+        if (now.hour, now.minute) < (digest_hour, digest_minute):
+            return
 
         today_str = now.date().isoformat()
         users = await self.store.list_active_users()
@@ -1028,6 +1048,56 @@ class SchulmanagerCog(commands.Cog):
                 except discord.Forbidden:
                     pass
 
+    async def _process_letter_notifications(
+        self, state: UserWorkspaceState, letters: list[dict[str, Any]]
+    ) -> None:
+        """DM the user about new unread Elternbriefe that require a confirmation (Lesebestätigung)."""
+        pref_enabled = await self.store.get_notification_pref(
+            state.guild_id, state.user_id, "letters", default=True
+        )
+        if not pref_enabled:
+            return
+
+        tz = resolve_timezone(self.settings.discord_timezone)
+        for letter in letters:
+            if not isinstance(letter, dict):
+                continue
+            if letter.get("read") or not letter.get("requires_confirmation"):
+                continue
+            letter_id = str(letter.get("id") or "")
+            if not letter_id:
+                continue
+            # Reuse the reminder_sent dedup table (reminder_type="letter").
+            if await self.store.has_sent_reminder(state.guild_id, state.user_id, letter_id, "letter"):
+                continue
+
+            title = str(letter.get("title") or "Elternbrief")
+            sender = str(letter.get("sender") or "").strip()
+            desc = f"**{title}**"
+            if sender:
+                desc += f"\nvon {sender}"
+            desc += "\n\n⚠️ Dieser Elternbrief erfordert eine Bestätigung. Bitte im Schulmanager bestätigen."
+
+            embed = discord.Embed(
+                title="✉️ Neuer Elternbrief",
+                color=discord.Color.gold(),
+                description=desc,
+                timestamp=datetime.now(tz),
+            )
+            embed.set_footer(text=state.student_name)
+
+            user = self.bot.get_user(state.user_id)
+            if user is None:
+                try:
+                    user = await self.bot.fetch_user(state.user_id)
+                except discord.NotFound:
+                    continue
+            try:
+                await user.send(embed=embed)
+                await self.store.mark_reminder_sent(state.guild_id, state.user_id, letter_id, "letter")
+            except discord.Forbidden:
+                pass
+
     async def _process_reminder(self, rule: ReminderRule) -> None:
         state = await self.store.get_user(rule.guild_id, rule.user_id)
         if state is None or not state.active:
@@ -1044,6 +1114,7 @@ class SchulmanagerCog(commands.Cog):
             except discord.NotFound:
                 return
 
+        tz = resolve_timezone(self.settings.discord_timezone)
         if rule.reminder_type == "exam":
             items = await self.api.get_exams(state.access_token, state.student_id, force_refresh=False)
             for item in items:
@@ -1054,7 +1125,8 @@ class SchulmanagerCog(commands.Cog):
                     item_date = date.fromisoformat(item_date_str)
                 except ValueError:
                     continue
-                item_dt = datetime(item_date.year, item_date.month, item_date.day, 8, 0, tzinfo=timezone.utc)
+                # Anchor at 08:00 school-local time (not UTC) so the reminder window is correct.
+                item_dt = datetime(item_date.year, item_date.month, item_date.day, 8, 0, tzinfo=tz)
                 if now < item_dt <= threshold:
                     item_id = str(item.get("id") or item_date_str)
                     already_sent = await self.store.has_sent_reminder(rule.guild_id, rule.user_id, item_id, "exam")
@@ -1081,7 +1153,6 @@ class SchulmanagerCog(commands.Cog):
                         pass
 
         elif rule.reminder_type == "homework":
-            tz = resolve_timezone(self.settings.discord_timezone)
             items = await self.api.get_homework(state.access_token, state.student_id, open_only=True, force_refresh=False)
             for item in items:
                 item_date_str = str(item.get("due_date") or "")
@@ -1091,7 +1162,8 @@ class SchulmanagerCog(commands.Cog):
                     item_date = date.fromisoformat(item_date_str)
                 except ValueError:
                     continue
-                item_dt = datetime(item_date.year, item_date.month, item_date.day, 8, 0, tzinfo=timezone.utc)
+                # Anchor at 08:00 school-local time (not UTC) so the reminder window is correct.
+                item_dt = datetime(item_date.year, item_date.month, item_date.day, 8, 0, tzinfo=tz)
                 if now < item_dt <= threshold:
                     item_id = str(item.get("id") or item_date_str)
                     already_sent = await self.store.has_sent_reminder(rule.guild_id, rule.user_id, item_id, "homework")
@@ -1130,6 +1202,7 @@ class SchulmanagerCog(commands.Cog):
         homework_raw = await self.api.get_homework(state.access_token, state.student_id, open_only=False, force_refresh=False)
         exams_raw = await self.api.get_exams(state.access_token, state.student_id, force_refresh=False)
         grades_raw = await self.api.get_grades(state.access_token, state.student_id, force_refresh=False)
+        letters_raw = await self.api.get_letters(state.access_token, state.student_id, force_refresh=False)
 
         today_str = today.isoformat()
         next_7 = today + timedelta(days=7)
@@ -1140,6 +1213,7 @@ class SchulmanagerCog(commands.Cog):
         upcoming_exams = [e for e in exams_raw if today_str <= str(e.get("date") or "") <= next_7.isoformat()]
         yesterday_str = (today - timedelta(days=1)).isoformat()
         recent_grades = [g for g in grades_raw if str(g.get("date") or "") >= yesterday_str]
+        unread_letters = [l for l in letters_raw if isinstance(l, dict) and not l.get("read")]
 
         embed = discord.Embed(
             title=f"☀️ Tages-Digest — {today.strftime('%A, %d.%m.%Y')}",
@@ -1162,23 +1236,31 @@ class SchulmanagerCog(commands.Cog):
 
         if today_hw:
             hw_lines = [f"• **{hw.get('subject', 'Fach')}**: {str(hw.get('text', ''))[:80]}" for hw in today_hw[:5]]
-            embed.add_field(name=f"📚 Heute fällig ({len(today_hw)})", value="\n".join(hw_lines), inline=False)
+            embed.add_field(name=f"📚 Heute fällig ({len(today_hw)})", value=_clip("\n".join(hw_lines), 1024), inline=False)
 
         if upcoming_exams:
             exam_lines: list[str] = []
             for exam in upcoming_exams[:5]:
                 d = str(exam.get("date") or "")
                 try:
-                    exam_epoch = int(datetime.fromisoformat(d).timestamp()) if d else 0
+                    dd = date.fromisoformat(d[:10]) if d else None
+                    exam_epoch = int(datetime(dd.year, dd.month, dd.day, tzinfo=tz).timestamp()) if dd else 0
                     time_str = f"<t:{exam_epoch}:D>" if exam_epoch else d
                 except ValueError:
                     time_str = d
                 exam_lines.append(f"• {time_str} **{exam.get('subject', 'Fach')}** — {exam.get('topic', '-')}")
-            embed.add_field(name=f"📝 Prüfungen (7 Tage, {len(upcoming_exams)})", value="\n".join(exam_lines), inline=False)
+            embed.add_field(name=f"📝 Prüfungen (7 Tage, {len(upcoming_exams)})", value=_clip("\n".join(exam_lines), 1024), inline=False)
 
         if recent_grades:
             grade_lines = [f"• **{g.get('subject', 'Fach')}**: {g.get('grade', '?')} {g.get('comment', '')}" for g in recent_grades[:5]]
-            embed.add_field(name=f"📊 Neue Noten ({len(recent_grades)})", value="\n".join(grade_lines), inline=False)
+            embed.add_field(name=f"📊 Neue Noten ({len(recent_grades)})", value=_clip("\n".join(grade_lines), 1024), inline=False)
+
+        if unread_letters:
+            letter_lines = [
+                f"• {'⚠️ ' if l.get('requires_confirmation') else ''}{str(l.get('title', 'Elternbrief'))[:80]}"
+                for l in unread_letters[:5]
+            ]
+            embed.add_field(name=f"✉️ Ungelesene Elternbriefe ({len(unread_letters)})", value=_clip("\n".join(letter_lines), 1024), inline=False)
 
         if not embed.fields:
             embed.description = "Heute keine besonderen Ereignisse."
@@ -1191,11 +1273,13 @@ class SchulmanagerCog(commands.Cog):
             "hw": len(today_hw),
             "exams": len(upcoming_exams),
             "grades": len(recent_grades),
+            "letters": len(unread_letters),
             "hw_texts": [str(hw.get("text", ""))[:80] for hw in today_hw[:5]],
             "exam_subjects": [str(e.get("subject", "")) for e in upcoming_exams[:5]],
             "grade_subjects": [str(g.get("subject", "")) for g in recent_grades[:5]],
+            "letter_titles": [str(l.get("title", ""))[:80] for l in unread_letters[:5]],
         }
-        fingerprint = "digest-v1:" + _fingerprint(fp_data)[:16]
+        fingerprint = "digest-v2:" + _fingerprint(fp_data)[:16]
 
         item = RenderedEmbed(key="digest", embed=embed, fingerprint=fingerprint)
         await self._upsert_embed(state.guild_id, state.user_id, channel, "status", item)
@@ -1249,6 +1333,13 @@ class SchulmanagerCog(commands.Cog):
         lock = self._user_locks.setdefault(key, asyncio.Lock())
 
         async with lock:
+            # Re-read the authoritative state after acquiring the lock: a concurrent sync (auto
+            # loop vs. manual vs. button) may have rotated the tokens while we waited, so the
+            # snapshot we were called with can carry an already-consumed refresh token.
+            fresh = await self.store.get_user(state.guild_id, state.user_id)
+            if fresh is not None:
+                state = fresh
+
             guild = self.bot.get_guild(state.guild_id)
             if guild is None:
                 await self.store.set_active(state.guild_id, state.user_id, False)
@@ -1275,6 +1366,7 @@ class SchulmanagerCog(commands.Cog):
                 webhooks_channel_id=workspace["webhooks"],
                 absences_channel_id=workspace["absences"],
                 messages_channel_id=workspace["messages"],
+                letters_channel_id=workspace["letters"],
             )
 
             try:
@@ -1321,6 +1413,7 @@ class SchulmanagerCog(commands.Cog):
 
         data = await self._fetch_payloads(state, force_refresh=force_refresh)
         await self._process_schedule_change_dms(state, data["schedule"])
+        await self._process_letter_notifications(state, data.get("letters", []))
         changes = await self._publish_payloads(guild, state, data)
         await self._publish_status(guild, state, reason=reason, data=data)
         await self._publish_webhook_notifications(guild, state, changes, reason=reason)
@@ -1418,13 +1511,15 @@ class SchulmanagerCog(commands.Cog):
 
     @staticmethod
     def _data_looks_empty(data: dict[str, Any]) -> bool:
-        """Prüft ob alle Schulmanager-Daten leer sind – ein Zeichen für eine abgelaufene Session."""
-        return (
-            not data.get("grades")
-            and not data.get("events")
-            and not data.get("homework")
-            and not data.get("absences")
-            and not data.get("messages")
+        """Heuristic for a dead session: ALL data sources empty.
+
+        Includes the schedule so a legitimately quiet account (has lessons but no current
+        grades/messages) is not repeatedly force-relogged. Since the API now returns explicit
+        401s for expired sessions, this is only a secondary fallback.
+        """
+        return not any(
+            data.get(key)
+            for key in ("schedule", "grades", "events", "homework", "absences", "messages", "letters")
         )
 
     async def _fetch_payloads(self, state: UserWorkspaceState, *, force_refresh: bool) -> dict[str, Any]:
@@ -1433,22 +1528,36 @@ class SchulmanagerCog(commands.Cog):
         to_date = today + timedelta(days=21)
 
         async def fetch_once(access_token: str) -> dict[str, Any]:
-            schedule = await self.api.get_schedule(access_token, state.student_id, from_date=today, to_date=to_date, force_refresh=force_refresh)
-            homework = await self.api.get_homework(access_token, state.student_id, open_only=False, force_refresh=force_refresh)
-            grades = await self.api.get_grades(access_token, state.student_id, force_refresh=force_refresh)
-            events = await self.api.get_events(access_token, state.student_id, force_refresh=force_refresh)
-            absences = await self.api.get_absences(access_token, state.student_id, force_refresh=force_refresh)
-            messages_data = await self.api.get_messages(access_token, state.student_id, force_refresh=force_refresh)
-            grade_stats = await self.api.get_grade_stats(access_token, state.student_id, force_refresh=force_refresh)
-            return {
-                "schedule": schedule,
-                "homework": homework,
-                "grades": grades,
-                "events": events,
-                "absences": absences,
-                "messages": messages_data,
-                "grade_stats": grade_stats,
+            sid = state.student_id
+            # Fetch all endpoints concurrently (was 7+ sequential round-trips) for much faster syncs.
+            coros = {
+                "schedule": self.api.get_schedule(access_token, sid, from_date=today, to_date=to_date, force_refresh=force_refresh),
+                "homework": self.api.get_homework(access_token, sid, open_only=False, force_refresh=force_refresh),
+                "grades": self.api.get_grades(access_token, sid, force_refresh=force_refresh),
+                "events": self.api.get_events(access_token, sid, force_refresh=force_refresh),
+                "absences": self.api.get_absences(access_token, sid, force_refresh=force_refresh),
+                "messages": self.api.get_messages(access_token, sid, force_refresh=force_refresh),
+                "grade_stats": self.api.get_grade_stats(access_token, sid, force_refresh=force_refresh),
+                "letters": self.api.get_letters(access_token, sid, force_refresh=force_refresh),
             }
+            labels = list(coros.keys())
+            results = await asyncio.gather(*coros.values(), return_exceptions=True)
+
+            data: dict[str, Any] = {}
+            for label, result in zip(labels, results):
+                if isinstance(result, ApiClientError) and result.status_code == 401:
+                    # Session expired — propagate so the caller can refresh / re-login.
+                    raise result
+                if isinstance(result, Exception):
+                    # One flaky/disabled endpoint must not abort the whole sync.
+                    LOGGER.warning(
+                        "Endpoint '%s' failed for guild=%s user=%s: %s",
+                        label, state.guild_id, state.user_id, result,
+                    )
+                    data[label] = {} if label == "grade_stats" else []
+                else:
+                    data[label] = result
+            return data
 
         try:
             data = await fetch_once(state.access_token)
@@ -1499,6 +1608,7 @@ class SchulmanagerCog(commands.Cog):
             "events": [],
             "absences": [],
             "messages": [],
+            "letters": [],
         }
 
         schedule_days = payloads["schedule"]
@@ -1508,6 +1618,7 @@ class SchulmanagerCog(commands.Cog):
         events_items = compact_rendered(render_events(payloads["events"], self.settings.discord_timezone))
         absences_items = compact_rendered(render_absences(payloads["absences"], self.settings.discord_timezone))
         messages_items = compact_rendered(render_messages(payloads["messages"], self.settings.discord_timezone))
+        letters_items = compact_rendered(render_letters(payloads.get("letters", []), self.settings.discord_timezone))
         grade_stats_items = compact_rendered(render_grade_stats(payloads["grade_stats"], self.settings.discord_timezone))
 
         channel_map = {
@@ -1569,6 +1680,17 @@ class SchulmanagerCog(commands.Cog):
                 items=messages_items,
             )
             changes["messages"] = msg_updates
+
+        letters_channel = self._get_channel(guild, state.letters_channel_id)
+        if letters_channel is not None:
+            letter_updates = await self._sync_channel_embeds(
+                guild_id=state.guild_id,
+                user_id=state.user_id,
+                channel=letters_channel,
+                channel_kind="letters",
+                items=letters_items,
+            )
+            changes["letters"] = letter_updates
 
         events_channel = self._get_channel(guild, state.events_channel_id)
         if events_channel is not None:
@@ -1790,6 +1912,10 @@ class SchulmanagerCog(commands.Cog):
         embed.add_field(name="🗓️ Events", value=str(len(data["events"])), inline=True)
         embed.add_field(name="📋 Fehlzeiten", value=str(len(data["absences"])), inline=True)
         embed.add_field(name="📬 Nachrichten", value=str(len(data["messages"])), inline=True)
+        letters_data = data.get("letters") or []
+        unread_letters = sum(1 for letter in letters_data if isinstance(letter, dict) and not letter.get("read"))
+        letters_value = str(len(letters_data)) + (f" ({unread_letters} ungelesen)" if unread_letters else "")
+        embed.add_field(name="✉️ Elternbriefe", value=letters_value, inline=True)
 
         item = RenderedEmbed(key="status", embed=embed, fingerprint=f"status-v3:{now_epoch // 60}")
         await self._upsert_embed(state.guild_id, state.user_id, channel, "status", item)
@@ -2056,19 +2182,17 @@ class SchulmanagerCog(commands.Cog):
 
     @staticmethod
     def _channel_update_delay(channel_kind: str) -> float:
-        if channel_kind in {"schedule_week", "homework", "grades", "events", "absences", "messages"}:
+        if channel_kind in {"schedule_week", "homework", "grades", "events", "absences", "messages", "letters"}:
             return 0.35
         return 0.2
 
     @staticmethod
     def _requires_relogin(exc: Exception) -> bool:
-        if not isinstance(exc, ApiClientError):
-            return False
-        if exc.status_code != 401:
-            return False
-        text = str(exc).casefold()
-        markers = ("session nicht gefunden", "neu einloggen", "refresh token", "ungültig", "bereits verwendet")
-        return any(marker in text for marker in markers)
+        # Any 401 that reaches here has already survived the in-flight token refresh in
+        # _fetch_payloads, so the access AND refresh tokens are unusable -> a fresh /login is
+        # required. Matching on German error wording was brittle (e.g. "Token ungueltig" vs the
+        # "ungültig" marker never matched); rely on the status code instead.
+        return isinstance(exc, ApiClientError) and exc.status_code == 401
 
     @staticmethod
     def _session_notice_text(exc: Exception) -> str:

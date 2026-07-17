@@ -39,6 +39,7 @@ class DiscordStateStore:
                     webhooks_channel_id INTEGER,
                     absences_channel_id INTEGER,
                     messages_channel_id INTEGER,
+                    letters_channel_id INTEGER,
                     active INTEGER NOT NULL DEFAULT 1,
                     last_sync_ts INTEGER NOT NULL DEFAULT 0,
                     last_error TEXT,
@@ -51,6 +52,7 @@ class DiscordStateStore:
                 ("password", "TEXT"),
                 ("absences_channel_id", "INTEGER"),
                 ("messages_channel_id", "INTEGER"),
+                ("letters_channel_id", "INTEGER"),
                 ("last_digest_date", "TEXT"),
             ]:
                 await self._ensure_user_column(db, col, ddl)
@@ -146,8 +148,8 @@ class DiscordStateStore:
                     category_id, status_channel_id, schedule_feed_channel_id,
                     schedule_week_channel_id, homework_channel_id, grades_channel_id,
                     events_channel_id, webhooks_channel_id, absences_channel_id,
-                    messages_channel_id, active, last_sync_ts, last_error, last_digest_date
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    messages_channel_id, letters_channel_id, active, last_sync_ts, last_error, last_digest_date
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(guild_id, user_id) DO UPDATE SET
                     email=excluded.email,
                     password=excluded.password,
@@ -168,6 +170,7 @@ class DiscordStateStore:
                     webhooks_channel_id=excluded.webhooks_channel_id,
                     absences_channel_id=excluded.absences_channel_id,
                     messages_channel_id=excluded.messages_channel_id,
+                    letters_channel_id=excluded.letters_channel_id,
                     active=excluded.active,
                     last_sync_ts=excluded.last_sync_ts,
                     last_error=excluded.last_error,
@@ -195,6 +198,7 @@ class DiscordStateStore:
                     state.webhooks_channel_id,
                     state.absences_channel_id,
                     state.messages_channel_id,
+                    state.letters_channel_id,
                     1 if state.active else 0,
                     state.last_sync_ts,
                     state.last_error,
@@ -590,6 +594,14 @@ class DiscordStateStore:
             )
             await db.commit()
 
+    async def purge_old_dedup(self, retention_days: int = 90) -> None:
+        """Drop dedup rows older than the retention window so these tables don't grow forever."""
+        cutoff = int(time.time()) - max(retention_days, 1) * 86400
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute("DELETE FROM schedule_change_seen WHERE seen_at < ?", (cutoff,))
+            await db.execute("DELETE FROM reminder_sent WHERE sent_at < ?", (cutoff,))
+            await db.commit()
+
     # ─── Row converters ───────────────────────────────────────────────────────
 
     @staticmethod
@@ -630,6 +642,7 @@ class DiscordStateStore:
             webhooks_channel_id=_opt_int("webhooks_channel_id"),
             absences_channel_id=_opt_int("absences_channel_id"),
             messages_channel_id=_opt_int("messages_channel_id"),
+            letters_channel_id=_opt_int("letters_channel_id"),
             active=bool(row["active"]),
             last_sync_ts=row["last_sync_ts"],
             last_error=_opt_str("last_error"),

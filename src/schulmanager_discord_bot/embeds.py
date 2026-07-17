@@ -630,13 +630,17 @@ def render_messages(messages: list[dict[str, Any]], timezone_name: str) -> list[
         subject = str(msg.get("subject") or "(kein Betreff)")
         body = str(msg.get("body_preview") or "").strip()
         read = bool(msg.get("read"))
+        unread_count = int(msg.get("unread_count") or 0)
 
         msg_dt = _parse_datetime(msg.get("date"), tz)
 
         color = discord.Color.light_grey() if read else discord.Color.blue()
 
+        title = f"{'📭' if read else '📬'} {_clip(subject, 100)}"
+        if unread_count > 0:
+            title += f" ({unread_count} neu)"
         embed = discord.Embed(
-            title=f"{'📭' if read else '📬'} {_clip(subject, 100)}",
+            title=title,
             color=color,
             timestamp=datetime.now(tz),
         )
@@ -644,18 +648,80 @@ def render_messages(messages: list[dict[str, Any]], timezone_name: str) -> list[
         lines: list[str] = []
         if msg_dt is not None:
             lines.append(f"Am: <t:{int(msg_dt.timestamp())}:F>")
+        lines.append("🔵 ungelesen" if not read else "✅ gelesen")
         if body:
             lines.append(f"\n{_clip(body, 200)}")
 
         embed.description = "\n".join(lines)
-        embed.set_footer(text=f"ID: {msg_id}")
+        embed.set_footer(text=f"Konversation • ID: {msg_id}")
 
-        fp_data = {"id": msg_id, "subject": subject, "read": read, "sender": sender}
+        fp_data = {"id": msg_id, "subject": subject, "read": read, "sender": sender, "unread": unread_count}
         rendered.append(RenderedEmbed(
             key=msg_id,
             embed=embed,
             fingerprint=_fingerprint(fp_data),
             sort_epoch=int(msg_dt.timestamp()) if msg_dt else None,
+        ))
+
+    return rendered
+
+
+def render_letters(letters: list[dict[str, Any]], timezone_name: str) -> list[RenderedEmbed]:
+    """Render each Elternbrief as its own embed (newest first)."""
+    tz = resolve_timezone(timezone_name)
+    rendered: list[RenderedEmbed] = []
+
+    sorted_letters = sorted(
+        [letter for letter in letters if isinstance(letter, dict)],
+        key=lambda letter: str(letter.get("date") or ""),
+        reverse=True,
+    )
+
+    for letter in sorted_letters[:25]:
+        letter_id = str(letter.get("id") or "")
+        title = str(letter.get("title") or "Elternbrief")
+        sender = str(letter.get("sender") or "").strip()
+        read = bool(letter.get("read"))
+        requires_confirmation = bool(letter.get("requires_confirmation"))
+        attachments = int(letter.get("attachment_count") or 0)
+        letter_dt = _parse_datetime(letter.get("date"), tz)
+
+        icon = "📩" if read else "✉️"
+        color = discord.Color.light_grey() if read else discord.Color.gold()
+
+        embed = discord.Embed(
+            title=f"{icon} {_clip(title, 100)}",
+            color=color,
+            timestamp=datetime.now(tz),
+        )
+        if sender:
+            embed.set_author(name=_clip(sender, 60))
+
+        lines: list[str] = []
+        if letter_dt is not None:
+            lines.append(f"Am: <t:{int(letter_dt.timestamp())}:F>")
+        status_parts = ["✅ gelesen" if read else "🔵 ungelesen"]
+        if requires_confirmation:
+            status_parts.append("⚠️ Bestätigung erforderlich")
+        if attachments:
+            status_parts.append(f"📎 {attachments} Anhang" + ("änge" if attachments != 1 else ""))
+        lines.append(" • ".join(status_parts))
+
+        embed.description = "\n".join(lines)
+        embed.set_footer(text=f"Elternbrief • ID: {letter_id}")
+
+        fp_data = {
+            "id": letter_id,
+            "title": title,
+            "read": read,
+            "confirm": requires_confirmation,
+            "attachments": attachments,
+        }
+        rendered.append(RenderedEmbed(
+            key=letter_id or _slug(title),
+            embed=embed,
+            fingerprint=_fingerprint(fp_data),
+            sort_epoch=int(letter_dt.timestamp()) if letter_dt else None,
         ))
 
     return rendered
@@ -683,7 +749,7 @@ def render_grade_stats(stats: dict[str, Any], timezone_name: str) -> list[Render
     lines: list[str] = []
     trend_icons = {"improving": "📈", "stable": "➡️", "declining": "📉"}
 
-    for subj in sorted(subjects, key=lambda s: s.get("average", 99)):
+    for subj in sorted(subjects, key=lambda s: s.get("average") if isinstance(s.get("average"), (int, float)) else 99):
         name = str(subj.get("subject") or "Fach")
         avg = subj.get("average")
         count = subj.get("grade_count", 0)
