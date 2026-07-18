@@ -3,10 +3,35 @@ from __future__ import annotations
 
 import asyncio
 
-from schulmanager_discord_bot.api_client import ApiClientError
+import httpx
+
+from schulmanager_discord_bot.api_client import ApiClientError, SchulmanagerApiClient
 from schulmanager_discord_bot.bot import SchulmanagerCog
 from schulmanager_discord_bot.models import UserWorkspaceState
 from schulmanager_discord_bot.storage import DiscordStateStore
+
+
+def test_connection_error_becomes_api_client_error() -> None:
+    """A transport failure (e.g. bad SM_DISCORD_API_BASE_URL) must surface as a clean
+    ApiClientError so the bot shows a friendly message instead of crashing."""
+    client = SchulmanagerApiClient("http://unreachable.invalid:9999")
+
+    class _FakeHttpx:
+        async def request(self, *a, **k):
+            raise httpx.ConnectError("Name or service not known")
+
+    client._client = _FakeHttpx()  # type: ignore[assignment]
+
+    async def run() -> None:
+        try:
+            await client.get_students("token")
+        except ApiClientError as exc:
+            assert exc.status_code is None
+            assert "nicht erreichbar" in str(exc)
+        else:
+            raise AssertionError("expected ApiClientError")
+
+    asyncio.run(run())
 
 
 def test_data_looks_empty_requires_all_empty() -> None:

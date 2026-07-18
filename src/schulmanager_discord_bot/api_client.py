@@ -264,10 +264,13 @@ class SchulmanagerApiClient:
         student_id: str,
     ) -> bytes:
         headers: dict[str, str] = {"Authorization": f"Bearer {access_token}"}
-        response = await self._client.get(
-            f"/students/{student_id}/calendar.ics",
-            headers=headers,
-        )
+        try:
+            response = await self._client.get(
+                f"/students/{student_id}/calendar.ics",
+                headers=headers,
+            )
+        except httpx.HTTPError as exc:
+            raise self._unreachable(exc) from exc
         if response.status_code >= 400:
             detail = self._extract_error_detail(response)
             raise ApiClientError(detail, status_code=response.status_code)
@@ -290,7 +293,10 @@ class SchulmanagerApiClient:
 
     async def flush_cache(self, access_token: str) -> None:
         headers: dict[str, str] = {"Authorization": f"Bearer {access_token}"}
-        response = await self._client.delete("/cache", headers=headers)
+        try:
+            response = await self._client.delete("/cache", headers=headers)
+        except httpx.HTTPError as exc:
+            raise self._unreachable(exc) from exc
         if response.status_code >= 400 and response.status_code != 204:
             detail = self._extract_error_detail(response)
             raise ApiClientError(detail, status_code=response.status_code)
@@ -319,13 +325,16 @@ class SchulmanagerApiClient:
         if access_token:
             headers["Authorization"] = f"Bearer {access_token}"
 
-        response = await self._client.request(
-            method,
-            path,
-            headers=headers,
-            json=json,
-            params=params,
-        )
+        try:
+            response = await self._client.request(
+                method,
+                path,
+                headers=headers,
+                json=json,
+                params=params,
+            )
+        except httpx.HTTPError as exc:
+            raise self._unreachable(exc) from exc
 
         if response.status_code >= 400:
             detail = self._extract_error_detail(response)
@@ -335,6 +344,14 @@ class SchulmanagerApiClient:
             return response.json()
         except ValueError as exc:
             raise ApiClientError("API returned invalid JSON") from exc
+
+    def _unreachable(self, exc: Exception) -> ApiClientError:
+        """Wrap a transport error (DNS/connect/timeout) into a clean, user-facing ApiClientError."""
+        return ApiClientError(
+            f"API nicht erreichbar unter {self._base_url} ({type(exc).__name__}). "
+            f"Läuft die API und stimmt SM_DISCORD_API_BASE_URL?",
+            status_code=None,
+        )
 
     @staticmethod
     def _extract_error_detail(response: httpx.Response) -> str:
