@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone, tzinfo
+from datetime import date, datetime, time, timezone, tzinfo
 from functools import lru_cache
 import hashlib
 import json
@@ -725,6 +725,123 @@ def render_letters(letters: list[dict[str, Any]], timezone_name: str) -> list[Re
         ))
 
     return rendered
+
+
+def render_exams(exams: list[dict[str, Any]], timezone_name: str) -> list[RenderedEmbed]:
+    """Render upcoming Klausuren as a single embed (soonest first)."""
+    tz = resolve_timezone(timezone_name)
+    embed = discord.Embed(title="📝 Klausuren", color=discord.Color.orange(), timestamp=datetime.now(tz))
+
+    valid = []
+    for exam in exams:
+        if not isinstance(exam, dict):
+            continue
+        exam_date = _parse_date(exam.get("date"))
+        if exam_date is None:
+            continue
+        valid.append((exam_date, exam))
+    valid.sort(key=lambda pair: pair[0])
+
+    if not valid:
+        embed.description = "Keine anstehenden Klausuren."
+        return [RenderedEmbed(key="exams", embed=embed, fingerprint=_fingerprint({"entries": []}))]
+
+    lines: list[str] = []
+    for exam_date, exam in valid[:25]:
+        epoch = int(datetime(exam_date.year, exam_date.month, exam_date.day, tzinfo=tz).timestamp())
+        subject = _clip(str(exam.get("subject") or "Fach"), 40)
+        topic = _clip(str(exam.get("topic") or ""), 80)
+        line = f"📝 <t:{epoch}:D> (<t:{epoch}:R>) — **{subject}**"
+        if topic:
+            line += f": {topic}"
+        lines.append(line)
+
+    embed.description = "\n".join(lines)
+    embed.set_footer(text=f"{len(valid)} Klausuren")
+    return [RenderedEmbed(key="exams", embed=embed, fingerprint=_fingerprint({"lines": lines}))]
+
+
+def render_payments(payments: list[dict[str, Any]], timezone_name: str) -> list[RenderedEmbed]:
+    """Render Zahlungen: one summary embed (open first) + per-invoice lines."""
+    tz = resolve_timezone(timezone_name)
+
+    embed = discord.Embed(title="💶 Zahlungen", color=discord.Color.dark_gold(), timestamp=datetime.now(tz))
+
+    valid = [p for p in payments if isinstance(p, dict)]
+    if not valid:
+        embed.description = "Keine Rechnungen vorhanden."
+        return [RenderedEmbed(key="payments", embed=embed, fingerprint=_fingerprint({"entries": []}))]
+
+    def sort_key(p: dict[str, Any]) -> tuple[Any, ...]:
+        return (bool(p.get("paid")), str(p.get("due_date") or "9999-12-31"))
+
+    valid.sort(key=sort_key)
+
+    open_total = 0.0
+    lines: list[str] = []
+    for p in valid[:25]:
+        title = _clip(str(p.get("title") or "Zahlung"), 60)
+        paid = bool(p.get("paid"))
+        amount = p.get("amount")
+        amount_str = f"{amount:.2f} €" if isinstance(amount, (int, float)) else "?"
+        icon = "✅" if paid else "🔴"
+        due = _parse_date(p.get("due_date"))
+        if not paid and isinstance(amount, (int, float)):
+            open_total += amount
+        due_str = ""
+        if due is not None:
+            due_epoch = int(datetime(due.year, due.month, due.day, tzinfo=tz).timestamp())
+            due_str = f" • fällig <t:{due_epoch}:D>"
+        lines.append(f"{icon} **{title}** — {amount_str}{due_str}")
+
+    embed.description = "\n".join(lines)
+    open_count = sum(1 for p in valid if not p.get("paid"))
+    embed.add_field(name="Offen", value=f"{open_count} ({open_total:.2f} €)", inline=True)
+    embed.add_field(name="Gesamt", value=str(len(valid)), inline=True)
+
+    return [RenderedEmbed(
+        key="payments",
+        embed=embed,
+        fingerprint=_fingerprint({"lines": lines, "open": open_count}),
+    )]
+
+
+def render_learning(units: list[dict[str, Any]], timezone_name: str) -> list[RenderedEmbed]:
+    """Render Lernen: assignments/materials grouped by subject, newest first."""
+    tz = resolve_timezone(timezone_name)
+
+    embed = discord.Embed(title="📓 Lernen", color=discord.Color.dark_purple(), timestamp=datetime.now(tz))
+
+    valid = [u for u in units if isinstance(u, dict)]
+    if not valid:
+        embed.description = "Keine Aufgaben oder Materialien vorhanden."
+        return [RenderedEmbed(key="learning", embed=embed, fingerprint=_fingerprint({"entries": []}))]
+
+    valid.sort(key=lambda u: str(u.get("published") or ""), reverse=True)
+
+    lines: list[str] = []
+    open_count = 0
+    for u in valid[:25]:
+        subject = _clip(str(u.get("subject") or "Fach"), 30)
+        title = _clip(str(u.get("title") or "Lerneinheit"), 60)
+        done = bool(u.get("done"))
+        seen = bool(u.get("seen"))
+        if not done:
+            open_count += 1
+        icon = "✅" if done else ("👁️" if seen else "🆕")
+        published = _parse_datetime(u.get("published"), tz)
+        when = f" • <t:{int(published.timestamp())}:R>" if published else ""
+        lines.append(f"{icon} **{subject}**: {title}{when}")
+
+    embed.description = "\n".join(lines)
+    embed.add_field(name="Offen", value=str(open_count), inline=True)
+    embed.add_field(name="Gesamt", value=str(len(valid)), inline=True)
+
+    return [RenderedEmbed(
+        key="learning",
+        embed=embed,
+        fingerprint=_fingerprint({"lines": lines, "open": open_count}),
+    )]
 
 
 def render_grade_stats(stats: dict[str, Any], timezone_name: str) -> list[RenderedEmbed]:

@@ -212,6 +212,36 @@ class SchulmanagerApiClient:
         )
         return payload if isinstance(payload, list) else []
 
+    async def get_payments(
+        self,
+        access_token: str,
+        student_id: str,
+        *,
+        force_refresh: bool = True,
+    ) -> list[dict[str, Any]]:
+        payload = await self._request_json(
+            "GET",
+            f"/students/{student_id}/payments",
+            access_token=access_token,
+            params={"force_refresh": str(force_refresh).lower()},
+        )
+        return payload if isinstance(payload, list) else []
+
+    async def get_learning(
+        self,
+        access_token: str,
+        student_id: str,
+        *,
+        force_refresh: bool = True,
+    ) -> list[dict[str, Any]]:
+        payload = await self._request_json(
+            "GET",
+            f"/students/{student_id}/learning",
+            access_token=access_token,
+            params={"force_refresh": str(force_refresh).lower()},
+        )
+        return payload if isinstance(payload, list) else []
+
     async def get_message_thread(
         self,
         access_token: str,

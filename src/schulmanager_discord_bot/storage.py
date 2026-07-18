@@ -5,7 +5,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from schulmanager_discord_bot.models import EmbedRecord, ReminderRule, UserWorkspaceState
+from schulmanager_discord_bot.models import EmbedRecord, ForumSectionRecord, ReminderRule, UserWorkspaceState
 
 
 class DiscordStateStore:
@@ -44,6 +44,8 @@ class DiscordStateStore:
                     last_sync_ts INTEGER NOT NULL DEFAULT 0,
                     last_error TEXT,
                     last_digest_date TEXT,
+                    forum_channel_id INTEGER,
+                    dashboard_thread_id INTEGER,
                     PRIMARY KEY (guild_id, user_id)
                 )
                 """
@@ -54,8 +56,24 @@ class DiscordStateStore:
                 ("messages_channel_id", "INTEGER"),
                 ("letters_channel_id", "INTEGER"),
                 ("last_digest_date", "TEXT"),
+                ("forum_channel_id", "INTEGER"),
+                ("dashboard_thread_id", "INTEGER"),
             ]:
                 await self._ensure_user_column(db, col, ddl)
+
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS forum_sections (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    section TEXT NOT NULL,
+                    thread_id INTEGER,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    fingerprint TEXT,
+                    PRIMARY KEY (guild_id, user_id, section)
+                )
+                """
+            )
 
             await db.execute(
                 """
@@ -318,6 +336,79 @@ class DiscordStateStore:
             await db.execute(
                 "DELETE FROM schedule_change_seen WHERE guild_id = ? AND user_id = ?",
                 (guild_id, user_id),
+            )
+            await db.execute(
+                "DELETE FROM forum_sections WHERE guild_id = ? AND user_id = ?",
+                (guild_id, user_id),
+            )
+            await db.commit()
+
+    # ─── Forum layout ─────────────────────────────────────────────────────────
+
+    async def set_forum(self, guild_id: int, user_id: int, forum_channel_id: int | None, dashboard_thread_id: int | None) -> None:
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                "UPDATE discord_users SET forum_channel_id = ?, dashboard_thread_id = ? WHERE guild_id = ? AND user_id = ?",
+                (forum_channel_id, dashboard_thread_id, guild_id, user_id),
+            )
+            await db.commit()
+
+    async def get_user_by_dashboard_thread(self, guild_id: int, thread_id: int) -> UserWorkspaceState | None:
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM discord_users WHERE guild_id = ? AND dashboard_thread_id = ?",
+                (guild_id, thread_id),
+            )
+            row = await cursor.fetchone()
+            return self._row_to_user(row) if row else None
+
+    async def list_forum_sections(self, guild_id: int, user_id: int) -> list[ForumSectionRecord]:
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM forum_sections WHERE guild_id = ? AND user_id = ?",
+                (guild_id, user_id),
+            )
+            rows = await cursor.fetchall()
+            return [self._row_to_section(row) for row in rows]
+
+    async def get_forum_section(self, guild_id: int, user_id: int, section: str) -> ForumSectionRecord | None:
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM forum_sections WHERE guild_id = ? AND user_id = ? AND section = ?",
+                (guild_id, user_id, section),
+            )
+            row = await cursor.fetchone()
+            return self._row_to_section(row) if row else None
+
+    async def upsert_forum_section(
+        self, guild_id: int, user_id: int, section: str, *, thread_id: int | None, enabled: bool, fingerprint: str | None
+    ) -> None:
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO forum_sections (guild_id, user_id, section, thread_id, enabled, fingerprint)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id, user_id, section) DO UPDATE SET
+                    thread_id = excluded.thread_id,
+                    enabled = excluded.enabled,
+                    fingerprint = excluded.fingerprint
+                """,
+                (guild_id, user_id, section, thread_id, 1 if enabled else 0, fingerprint),
+            )
+            await db.commit()
+
+    async def set_forum_section_enabled(self, guild_id: int, user_id: int, section: str, enabled: bool) -> None:
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO forum_sections (guild_id, user_id, section, thread_id, enabled, fingerprint)
+                VALUES (?, ?, ?, NULL, ?, NULL)
+                ON CONFLICT(guild_id, user_id, section) DO UPDATE SET enabled = excluded.enabled
+                """,
+                (guild_id, user_id, section, 1 if enabled else 0),
             )
             await db.commit()
 
@@ -647,6 +738,8 @@ class DiscordStateStore:
             last_sync_ts=row["last_sync_ts"],
             last_error=_opt_str("last_error"),
             last_digest_date=_opt_str("last_digest_date"),
+            forum_channel_id=_opt_int("forum_channel_id"),
+            dashboard_thread_id=_opt_int("dashboard_thread_id"),
         )
 
     @staticmethod
@@ -657,6 +750,19 @@ class DiscordStateStore:
         if column_name in existing:
             return
         await db.execute(f"ALTER TABLE discord_users ADD COLUMN {column_name} {ddl}")
+
+    @staticmethod
+    def _row_to_section(row: aiosqlite.Row) -> ForumSectionRecord:
+        thread_id = row["thread_id"]
+        fingerprint = row["fingerprint"]
+        return ForumSectionRecord(
+            guild_id=row["guild_id"],
+            user_id=row["user_id"],
+            section=row["section"],
+            thread_id=int(thread_id) if thread_id is not None else None,
+            enabled=bool(row["enabled"]),
+            fingerprint=str(fingerprint) if fingerprint is not None else None,
+        )
 
     @staticmethod
     def _row_to_embed(row: aiosqlite.Row) -> EmbedRecord:

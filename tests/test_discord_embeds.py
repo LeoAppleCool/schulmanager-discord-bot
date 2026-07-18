@@ -2,10 +2,13 @@ from datetime import date, datetime, timedelta, timezone
 
 from schulmanager_discord_bot.embeds import (
     render_events,
+    render_exams,
     render_grades,
     render_homework,
+    render_learning,
     render_letters,
     render_messages,
+    render_payments,
     render_schedule_feed,
     render_schedule_week,
 )
@@ -313,6 +316,31 @@ def test_render_letters() -> None:
 
 def test_render_letters_empty() -> None:
     assert render_letters([], "Europe/Berlin") == []
+
+
+def test_render_payments() -> None:
+    payments = [
+        {"id": "p1", "title": "Klassenfahrt", "amount": 120.0, "paid": False, "due_date": "2026-08-01"},
+        {"id": "p2", "title": "Kopiergeld", "amount": 15.0, "paid": True, "due_date": "2026-05-01"},
+    ]
+    rendered = render_payments(payments, "Europe/Berlin")
+    assert len(rendered) == 1
+    text = rendered[0].embed.description or ""
+    assert "Klassenfahrt" in text and "🔴" in text  # unpaid marker
+
+
+def test_render_learning() -> None:
+    units = [
+        {"id": "u1", "subject": "DB", "title": "Arbeitsblatt", "published": "2026-07-10T09:00:00", "done": False, "seen": False},
+    ]
+    rendered = render_learning(units, "Europe/Berlin")
+    assert len(rendered) == 1
+    assert "Arbeitsblatt" in (rendered[0].embed.description or "")
+
+
+def test_render_exams_empty() -> None:
+    rendered = render_exams([], "Europe/Berlin")
+    assert rendered and "Keine" in (rendered[0].embed.description or "")
 
 
 def test_render_messages_shows_unread_count() -> None:

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "schulmanager-discord-bot"
-version = "0.2.0"
+version = "0.3.0"
 description = "Discord bot for Schulmanager API"
 readme = "README.md"
 requires-python = ">=3.11"

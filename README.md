@@ -21,15 +21,18 @@ Die API muss gestartet und erreichbar sein, bevor der Bot verbunden werden kann.
 
 ## Features
 
-- **Private Kanäle pro Nutzer** — automatisch erstellte Kategorie mit 10 Kanälen (Stundenplan, Hausaufgaben, Noten, Termine, Fehlzeiten, Nachrichten, Elternbriefe, Webhook-Log, ...)
-- **Elternbriefe** — eigener Kanal mit Lesestatus + DM-Hinweis bei bestätigungspflichtigen Briefen
-- **Automatischer Sync** im konfigurierbaren Intervall (Standard: alle 120 Sekunden), alle Datenquellen werden **parallel** abgerufen; ein einzelner fehlerhafter Endpoint blockiert den Sync nicht
-- **Hausaufgaben-Reaktionen** — ✅ auf eine Nachricht reagieren markiert die Aufgabe (lokal) als erledigt
-- **Tages-Digest** — morgens eine Zusammenfassung im Status-Kanal (holt auch bei Ausfallzeit nach)
-- **Erinnerungen** — DM-Erinnerungen vor Klausuren und Hausaufgaben-Abgaben (in Schul-Zeitzone)
-- **Stundenplan-Änderungs-DMs** — sofortige Benachrichtigung bei Ausfall oder Vertretung
-- **Login-Rolle** — optionale Discord-Rolle wird beim Login automatisch vergeben und beim Logout wieder entfernt
-- **Admin-Befehle** — Nutzerverwaltung, Sync-Übersicht und Cache-Steuerung direkt aus Discord
+- **Privates Forum pro Nutzer** — beim `/login` wird ein privater **Forum-Kanal** mit deinem Namen erstellt (nur du siehst ihn). Jeder Bereich (Stundenplan, Hausaufgaben, Noten, Klausuren, Termine, Fehlzeiten, Nachrichten, Elternbriefe, Zahlungen, Lernen) ist ein eigener **Thread**.
+- **Angepinntes Dashboard** — ganz oben ein gepinnter Thread mit Live-Übersicht (nächste Stunde, offene Aufgaben, ungelesene Nachrichten/Briefe, offene Zahlungen …) und **Buttons**: 🔄 Sync · 📅 Kalender · ⚙️ Threads verwalten.
+- **Threads an/aus** — über „Threads verwalten" (oder `/threads`) schaltest du einzelne Bereiche aus (Thread wird gelöscht) oder wieder an (wird neu erstellt).
+- **Zahlungen & Lernen** — eigene Threads für offene/bezahlte Rechnungen und für Aufgaben/Material (seen/done).
+- **Elternbriefe** — eigener Thread mit Lesestatus + DM-Hinweis bei bestätigungspflichtigen Briefen.
+- **Automatischer Sync** im konfigurierbaren Intervall (Standard: 120 s); alle Datenquellen werden **parallel** abgerufen; ein einzelner fehlerhafter Endpoint blockiert den Sync nicht.
+- **Tages-Digest** — morgens eine Zusammenfassung im Dashboard-Thread (holt auch bei Ausfallzeit nach).
+- **Erinnerungen** — DM-Erinnerungen vor Klausuren und Hausaufgaben (in Schul-Zeitzone).
+- **Stundenplan-Änderungs-DMs** — sofortige Benachrichtigung bei Ausfall/Vertretung.
+- **Login-Rolle** & **Admin-Befehle** — optionale Rolle beim Login; Nutzerverwaltung/Sync/Cache aus Discord.
+
+> **Bot-Rechte:** Der Bot braucht **Kanäle verwalten**, **Threads verwalten** und **Öffentliche Threads erstellen**, um die privaten Foren anzulegen.
 
 ---
 
@@ -94,14 +97,14 @@ Vollständige Liste: `.env.example`
 
 | Befehl | Beschreibung |
 |---|---|
-| `/login email password [student_id]` | Schulmanager-Login und private Kanäle anlegen |
-| `/logout [delete_category]` | Bot-Zugang entfernen (optional: Kanäle löschen) |
+| `/login email password [student_id]` | Schulmanager-Login und privates Forum anlegen |
+| `/logout [delete_forum]` | Bot-Zugang entfernen (optional: Forum löschen) |
 | `/sync` | Manuellen Sync auslösen |
 | `/status` | Bot-Status und letzten Sync-Zeitpunkt anzeigen |
 | `/calendar` | ICS-Kalender als DM senden |
-| `/digest` | Tages-Digest sofort anzeigen |
+| `/digest` | Tages-Digest sofort posten |
 | `/info` | Allgemeine Bot-Informationen |
-| `/channels` | Eigene Schulmanager-Kanäle anzeigen |
+| `/threads` | Forum-Threads anzeigen & an/aus schalten |
 | `/remind exams <hours>` | Klausur-Erinnerung X Stunden vorher aktivieren |
 | `/remind homework <hours>` | Hausaufgaben-Erinnerung X Stunden vorher aktivieren |
 | `/remind off <type>` | Erinnerung deaktivieren |
@@ -110,7 +113,6 @@ Vollständige Liste: `.env.example`
 | `/notify letters <on/off>` | DM bei neuen bestätigungspflichtigen Elternbriefen |
 | `/notify status` | Benachrichtigungs-Einstellungen anzeigen |
 | `/debug-state` | Debug-Infos für den eigenen Account |
-| `/debug-webhook` | Test-Nachricht in den Webhook-Kanal senden |
 
 ### Admin
 
@@ -126,22 +128,24 @@ Vollständige Liste: `.env.example`
 
 ---
 
-## Kanal-Layout
+## Forum-Layout
 
-Pro Nutzer wird automatisch eine private Kategorie mit folgenden Kanälen erstellt:
+Pro Nutzer wird ein privater **Forum-Kanal** erstellt. Der gepinnte **📊 Dashboard**-Thread bündelt
+die Übersicht + Buttons; darunter liegt pro Bereich ein Thread (per `/threads` an/aus schaltbar):
 
-| Kanal | Inhalt |
+| Thread | Inhalt |
 |---|---|
-| `00-status` | Sync-Status-Embed + Tages-Digest + 🔄-Sync-Button |
-| `01-schedule-feed` | Nächste Stunden (automatisch aktualisiert) |
-| `02-schedule-week` | Wochenübersicht (ein Embed pro Tag) |
-| `03-homework` | Eine Nachricht pro Hausaufgabe + ✅-Reaktion zum Abhaken |
-| `04-grades` | Noten je Fach + Notenstatistik mit Trend |
-| `05-events` | Schultermine + „Nächstes Event"-Panel |
-| `06-webhooks` | Änderungslog nach jedem Sync |
-| `07-absences` | Fehlzeiten-Übersicht |
-| `08-messages` | Messenger-Konversationen (mit Ungelesen-Zähler) |
-| `09-letters` | Elternbriefe mit Lesestatus & Bestätigungshinweis |
+| 📊 **Dashboard** (gepinnt) | Live-Übersicht + Buttons (Sync, Kalender, Threads verwalten) + Tages-Digest |
+| 📅 Stundenplan | Nächste Stunden + Wochenübersicht |
+| 📚 Hausaufgaben | Nach Fälligkeitstag gruppiert |
+| 📊 Noten | Notenstatistik mit Trend + Noten je Fach |
+| 📝 Klausuren | Anstehende Klausuren |
+| 🗓️ Termine | Schultermine |
+| 📋 Fehlzeiten | Fehlzeiten-Übersicht (entschuldigt/unentschuldigt) |
+| 📬 Nachrichten | Messenger-Konversationen (mit Ungelesen-Zähler) |
+| ✉️ Elternbriefe | Elternbriefe mit Lesestatus & Bestätigungshinweis |
+| 💶 Zahlungen | Offene/bezahlte Rechnungen |
+| 📓 Lernen | Aufgaben & Material (seen/done) |
 
 ---
 
@@ -151,11 +155,12 @@ Pro Nutzer wird automatisch eine private Kategorie mit folgenden Kanälen erstel
 src/schulmanager_discord_bot/
 ├── __main__.py      # Einstiegspunkt: lädt Settings und startet den Bot
 ├── config.py        # Standalone Settings (pydantic-settings, SM_ prefix)
-├── bot.py           # Discord-Cog: Slash-Befehle, Sync-Loop, Kanal-Management
+├── bot.py           # Discord-Cog: Slash-Befehle, Sync-Loop, Forum-Präsentation
+├── forum.py         # Forum-Sektionen, Rendering-Dispatch, Dashboard-/Verwaltungs-Views
 ├── api_client.py    # Async HTTP-Client für die Schulmanager API (httpx)
 ├── embeds.py        # Embed-Rendering mit Fingerprint-basierter Deduplizierung
-├── storage.py       # SQLite-Persistenz (UserWorkspaceState, EmbedRecord, ...)
-└── models.py        # Datenmodelle (UserWorkspaceState, ReminderRule, ...)
+├── storage.py       # SQLite-Persistenz (UserWorkspaceState, ForumSectionRecord, ...)
+└── models.py        # Datenmodelle (UserWorkspaceState, ForumSectionRecord, ...)
 ```
 
 **Tech-Stack:** Python 3.11+, discord.py 2.x, httpx, pydantic-settings, aiosqlite, Docker Compose

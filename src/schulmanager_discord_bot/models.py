@@ -31,6 +31,19 @@ class UserWorkspaceState:
     last_sync_ts: int
     last_error: str | None
     last_digest_date: str | None  # ISO date string
+    # Forum-based layout (v2): a private forum channel + a pinned dashboard thread.
+    forum_channel_id: int | None = None
+    dashboard_thread_id: int | None = None
+
+
+@dataclass(slots=True)
+class ForumSectionRecord:
+    guild_id: int
+    user_id: int
+    section: str
+    thread_id: int | None
+    enabled: bool
+    fingerprint: str | None
 
 
 @dataclass(slots=True)
