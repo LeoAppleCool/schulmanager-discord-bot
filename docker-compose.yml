@@ -2,8 +2,13 @@ services:
   discord-bot:
     build: .
     env_file: .env
+    # SM_DISCORD_API_BASE_URL comes from .env. If it is unset there, fall back to
+    # host.docker.internal (the Docker host), which resolves thanks to the extra_hosts
+    # mapping below — even on Linux. See .env for the reachable-URL options.
     environment:
-      SM_DISCORD_API_BASE_URL: http://host.docker.internal:8000
+      SM_DISCORD_API_BASE_URL: ${SM_DISCORD_API_BASE_URL:-http://host.docker.internal:8000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - bot-data:/app/data
     restart: unless-stopped
