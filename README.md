@@ -1,6 +1,6 @@
 # Schulmanager Discord Bot
 
-> Discord-Bot für die [Schulmanager API](https://github.com/leoapplecool/schulmanager-api) — synchronisiert Schuldaten automatisch in private Discord-Kanäle pro Nutzer.
+> Discord-Bot für die [Schulmanager API](https://github.com/leoapplecool/schulmanager-api) — synchronisiert Schuldaten automatisch in ein privates Forum pro Nutzer (ein Thread je Bereich + gepinntes Dashboard).
 
 ![Python](https://img.shields.io/badge/Python-3.11%2B-blue?logo=python)
 ![Discord.py](https://img.shields.io/badge/discord.py-2.x-5865F2?logo=discord)
@@ -81,7 +81,7 @@ python -m schulmanager_discord_bot
 | `SM_DISCORD_SYNC_INTERVAL_SECONDS` | Sync-Intervall in Sekunden | `120` |
 | `SM_DISCORD_DB_PATH` | Pfad zur SQLite-Datenbank des Bots | `data/discord_bot.sqlite3` |
 | `SM_DISCORD_TIMEZONE` | Zeitzone für alle Zeitanzeigen | `Europe/Berlin` |
-| `SM_DISCORD_CATEGORY_PREFIX` | Präfix für private Nutzer-Kategorien | `schulmanager` |
+| `SM_DISCORD_CATEGORY_PREFIX` | Präfix für den privaten Forum-Namen pro Nutzer | `schulmanager` |
 | `SM_DISCORD_DIGEST_TIME` | Uhrzeit für den Tages-Digest (HH:MM) | `07:00` |
 | `SM_DISCORD_DIGEST_ENABLED` | Tages-Digest aktivieren | `true` |
 | `SM_DISCORD_LOGGED_IN_ROLE_ID` | Rolle die bei Login vergeben / bei Logout entfernt wird | *(leer)* |
