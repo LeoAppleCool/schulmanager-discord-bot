@@ -27,7 +27,7 @@ The API must be started and reachable before the bot can connect. The URL is con
 - **Payments & learning** — dedicated threads for open/paid invoices and for tasks/materials (seen/done).
 - **Parent letters** — a dedicated thread with read status + DM notice for letters that require confirmation.
 - **Automatic sync** at a configurable interval (default: 120 s); all data sources are fetched **in parallel**; a single failing endpoint does not block the sync.
-- **Daily digest** — a summary in the dashboard thread each morning (also catches up after downtime).
+- **Daily digest** — one summary message in the dashboard thread each morning, **edited in place** for the rest of the day instead of being posted again (also catches up after downtime).
 - **Reminders** — DM reminders before exams and homework (in the school time zone).
 - **Timetable change DMs** — instant notification for cancellations/substitutions.
 - **Login role** & **admin commands** — optional role on login; user management/sync/cache from Discord.
@@ -102,7 +102,7 @@ Full list: `.env.example`
 | `/sync` | Trigger a manual sync |
 | `/status` | Show bot status and the last sync time |
 | `/calendar` | Send the ICS calendar as a DM |
-| `/digest` | Post the daily digest immediately |
+| `/digest` | Post today's digest immediately, or refresh it if it already exists |
 | `/info` | General bot information |
 | `/threads` | Show forum threads & toggle them on/off |
 | `/remind exams <hours>` | Enable an exam reminder X hours in advance |

@@ -191,8 +191,11 @@ class DiscordStateStore:
                     letters_channel_id=excluded.letters_channel_id,
                     active=excluded.active,
                     last_sync_ts=excluded.last_sync_ts,
-                    last_error=excluded.last_error,
-                    last_digest_date=excluded.last_digest_date
+                    last_error=excluded.last_error
+                    -- last_digest_date is deliberately NOT updated here: callers pass a state
+                    -- snapshot read before a long stretch of network I/O, so echoing it back
+                    -- would clobber a digest date written meanwhile. update_digest_date() owns
+                    -- this column (same reasoning as forum_channel_id / dashboard_thread_id).
                 """,
                 (
                     state.guild_id,

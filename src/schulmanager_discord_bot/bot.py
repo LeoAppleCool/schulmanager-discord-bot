@@ -14,7 +14,7 @@ from discord.ext import commands, tasks
 
 from schulmanager_discord_bot.api_client import ApiClientError, SchulmanagerApiClient
 from schulmanager_discord_bot.config import Settings
-from schulmanager_discord_bot.embeds import _clip, resolve_timezone
+from schulmanager_discord_bot.embeds import _clip, _fingerprint, resolve_timezone
 from schulmanager_discord_bot.forum import (
     SECTION_KEYS,
     SECTION_TITLES,
@@ -23,12 +23,46 @@ from schulmanager_discord_bot.forum import (
     render_section,
     section_thread_name,
 )
-from schulmanager_discord_bot.models import ReminderRule, UserWorkspaceState
+from schulmanager_discord_bot.models import EmbedRecord, ReminderRule, UserWorkspaceState
 from schulmanager_discord_bot.storage import DiscordStateStore
 
 LOGGER = logging.getLogger(__name__)
 
 DASHBOARD_NAME = "📊 Dashboard"
+
+# channel_kind used in discord_embed_messages to track the one digest message per day.
+DIGEST_KIND = "digest"
+
+
+def _digest_fingerprint(
+    today_str: str,
+    student_name: str,
+    lessons: list[dict[str, Any]],
+    homework: list[dict[str, Any]],
+    exams: list[dict[str, Any]],
+    letters: list[dict[str, Any]],
+) -> str:
+    """Hash the digest's visible content so an unchanged digest never triggers an edit.
+
+    Covers every field the embed renders, and deliberately excludes the embed's
+    timestamp, which changes on every tick and would defeat the whole point.
+    """
+    payload = {
+        "date": today_str,
+        "student": student_name,
+        "lessons": [
+            [str(l.get("start_time") or ""), str(l.get("subject") or ""), str(l.get("change_type") or "")]
+            for l in lessons[:6]
+        ],
+        "lesson_count": len(lessons),
+        "homework": [[str(h.get("subject") or ""), str(h.get("text") or "")[:80]] for h in homework[:5]],
+        "homework_count": len(homework),
+        "exams": [[str(e.get("date") or ""), str(e.get("subject") or "")] for e in exams[:5]],
+        "exam_count": len(exams),
+        "letters": [[bool(l.get("requires_confirmation")), str(l.get("title") or "")[:80]] for l in letters[:5]],
+        "letter_count": len(letters),
+    }
+    return "digest-v3:" + _fingerprint(payload)[:16]
 
 
 class SchulmanagerCog(commands.Cog):
@@ -220,7 +254,7 @@ class SchulmanagerCog(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
         await self._send_calendar_dm(interaction, state)
 
-    @app_commands.command(name="digest", description="Tages-Zusammenfassung jetzt posten")
+    @app_commands.command(name="digest", description="Tages-Zusammenfassung jetzt posten/aktualisieren")
     async def digest_now(self, interaction: discord.Interaction) -> None:
         state = await self._require_state(interaction)
         if state is None:
@@ -230,11 +264,21 @@ class SchulmanagerCog(commands.Cog):
             state = await self._ensure_valid_tokens(state)
             guild = interaction.guild
             assert guild is not None
-            await self._send_digest(guild, state)
+            # force=True: an explicit /digest must reach Discord even when nothing changed,
+            # so it also repairs a digest the user deleted.
+            async with self._user_locks.setdefault((state.guild_id, state.user_id), asyncio.Lock()):
+                posted = await self._send_digest(guild, state, force=True)
         except Exception as exc:
             await interaction.followup.send(f"Digest fehlgeschlagen: {exc}", ephemeral=True)
             return
-        await interaction.followup.send("Tages-Zusammenfassung wurde gepostet.", ephemeral=True)
+        if not posted:
+            await interaction.followup.send("Digest fehlgeschlagen: Dashboard-Thread nicht gefunden.", ephemeral=True)
+            return
+        tz = resolve_timezone(self.settings.discord_timezone)
+        today_str = datetime.now(tz).date().isoformat()
+        if state.last_digest_date != today_str:
+            await self.store.update_digest_date(state.guild_id, state.user_id, today_str)
+        await interaction.followup.send("Tages-Zusammenfassung ist aktuell.", ephemeral=True)
 
     @app_commands.command(name="threads", description="Zeigt/verwaltet deine Forum-Threads")
     async def threads_cmd(self, interaction: discord.Interaction) -> None:
@@ -629,17 +673,26 @@ class SchulmanagerCog(commands.Cog):
             return
         today_str = now.date().isoformat()
         for state in await self.store.list_active_users():
-            if state.last_digest_date == today_str:
-                continue
             if not await self.store.get_notification_pref(state.guild_id, state.user_id, "digest", default=True):
                 continue
             guild = self.bot.get_guild(state.guild_id)
             if guild is None:
                 continue
+            # Two independent guards, so one lost write cannot bring the spam back.
+            # (a) the day is already marked done -- even if the embed row went missing;
+            # (b) today's message exists -- the sync loop edits it in place from data it
+            #     has fetched anyway, so there is nothing to post and nothing to fetch.
+            # Both gate only the create path; editing stays the sync loop's job.
+            if state.last_digest_date == today_str:
+                continue
+            if await self.store.get_embed_record(state.guild_id, state.user_id, DIGEST_KIND, today_str):
+                continue
             try:
                 state = await self._ensure_valid_tokens(state)
-                await self._send_digest(guild, state)
-                await self.store.update_digest_date(state.guild_id, state.user_id, today_str)
+                async with self._user_locks.setdefault((state.guild_id, state.user_id), asyncio.Lock()):
+                    posted = await self._send_digest(guild, state)
+                if posted and state.last_digest_date != today_str:
+                    await self.store.update_digest_date(state.guild_id, state.user_id, today_str)
             except Exception as exc:
                 LOGGER.warning("Digest failed for guild=%s user=%s: %s", state.guild_id, state.user_id, exc)
 
@@ -740,21 +793,56 @@ class SchulmanagerCog(commands.Cog):
             if await self._dm_user(rule.user_id, embed):
                 await self.store.mark_reminder_sent(rule.guild_id, rule.user_id, item_id, rule.reminder_type)
 
-    async def _send_digest(self, guild: discord.Guild, state: UserWorkspaceState) -> None:
-        thread = await self._get_thread(guild, state.dashboard_thread_id)
-        if thread is None:
-            return
+    async def _send_digest(
+        self,
+        guild: discord.Guild,
+        state: UserWorkspaceState,
+        *,
+        data: dict[str, Any] | None = None,
+        create: bool = True,
+        force: bool = False,
+    ) -> bool:
+        """Publish today's digest as a single message that is edited in place.
+
+        The first call of the day posts the message and remembers its id; every later
+        call edits that same message instead of posting a new one. A new message is
+        only started when the date rolls over. Returns True if today's digest message
+        exists afterwards (i.e. the day may be marked as done).
+
+        With ``create=False`` an existing digest is only refreshed -- a missing or deleted
+        one is never (re-)posted, so the sync loop can never make a digest appear before
+        ``discord_digest_time`` or bring back one the user deleted on purpose.
+        Pass ``data`` (a payload dict from ``_fetch_payloads``) to reuse already fetched
+        data instead of hitting the API again. ``force`` skips the no-change shortcut.
+        """
         tz = resolve_timezone(self.settings.discord_timezone)
         today = datetime.now(tz).date()
         today_str = today.isoformat()
         to_date = today + timedelta(days=21)
 
-        schedule = await self.api.get_schedule(state.access_token, state.student_id, today, to_date, force_refresh=False)
-        homework = await self.api.get_homework(state.access_token, state.student_id, open_only=False, force_refresh=False)
-        exams = await self.api.get_exams(state.access_token, state.student_id, force_refresh=False)
-        letters = await self.api.get_letters(state.access_token, state.student_id, force_refresh=False)
+        # Checked before _get_thread: on the refresh path this runs for every user on
+        # every sync, and _get_thread can cost an HTTP round trip.
+        record = await self.store.get_embed_record(state.guild_id, state.user_id, DIGEST_KIND, today_str)
+        if record is None and not create:
+            return False
 
-        today_lessons = next((d.get("lessons", []) for d in schedule if d.get("date") == today_str), [])
+        thread = await self._get_thread(guild, state.dashboard_thread_id)
+        if thread is None:
+            return False
+
+        if data is not None:
+            schedule = data.get("schedule") or []
+            homework = data.get("homework") or []
+            exams = data.get("exams") or []
+            letters = data.get("letters") or []
+        else:
+            schedule = await self.api.get_schedule(state.access_token, state.student_id, today, to_date, force_refresh=False)
+            homework = await self.api.get_homework(state.access_token, state.student_id, open_only=False, force_refresh=False)
+            exams = await self.api.get_exams(state.access_token, state.student_id, force_refresh=False)
+            letters = await self.api.get_letters(state.access_token, state.student_id, force_refresh=False)
+
+        # `or []`: a day can carry "lessons": null, which .get(..., []) would pass through.
+        today_lessons = next((d.get("lessons") or [] for d in schedule if d.get("date") == today_str), [])
         today_hw = [h for h in homework if h.get("due_date") == today_str and not h.get("done")]
         next_7 = (today + timedelta(days=7)).isoformat()
         upcoming_exams = [e for e in exams if today_str <= str(e.get("date") or "") <= next_7]
@@ -779,10 +867,73 @@ class SchulmanagerCog(commands.Cog):
             embed.add_field(name=f"✉️ Ungelesene Elternbriefe ({len(unread_letters)})", value=_clip("\n".join(f"• {'⚠️ ' if l.get('requires_confirmation') else ''}{str(l.get('title', ''))[:80]}" for l in unread_letters[:5]), 1024), inline=False)
         if not embed.fields:
             embed.description = "Heute keine besonderen Ereignisse."
+
+        fingerprint = _digest_fingerprint(
+            today_str, state.student_name, today_lessons, today_hw, upcoming_exams, unread_letters
+        )
+        return await self._upsert_digest_message(
+            state, thread, today_str, embed, fingerprint, record, create=create, force=force
+        )
+
+    async def _upsert_digest_message(
+        self,
+        state: UserWorkspaceState,
+        thread: discord.Thread,
+        today_str: str,
+        embed: discord.Embed,
+        fingerprint: str,
+        record: EmbedRecord | None,
+        *,
+        create: bool,
+        force: bool,
+    ) -> bool:
+        """Edit today's digest message, or post it once if it does not exist yet."""
+        if record is not None:
+            if record.fingerprint == fingerprint and not force:
+                return True  # nothing changed -- do not touch Discord at all
+            try:
+                await thread.get_partial_message(record.message_id).edit(embed=embed)
+                await self.store.upsert_embed_record(
+                    state.guild_id, state.user_id, DIGEST_KIND, today_str, record.message_id, fingerprint
+                )
+                return True
+            except discord.NotFound:
+                # The message is gone. Only an explicit create may put it back -- the sync
+                # loop must not resurrect a digest the user deleted on purpose.
+                if not create:
+                    return False
+            except discord.HTTPException as exc:
+                LOGGER.warning("Digest edit failed for guild=%s user=%s: %s", state.guild_id, state.user_id, exc)
+                return True  # keep the record; retry on the next tick rather than reposting
+
         try:
-            await thread.send(embed=embed)
-        except discord.HTTPException:
-            pass
+            message = await thread.send(embed=embed)
+        except discord.HTTPException as exc:
+            LOGGER.warning("Digest post failed for guild=%s user=%s: %s", state.guild_id, state.user_id, exc)
+            return False
+        try:
+            await self.store.upsert_embed_record(
+                state.guild_id, state.user_id, DIGEST_KIND, today_str, message.id, fingerprint
+            )
+        except Exception:
+            # Losing this row would make the digest look un-posted and be sent again on the
+            # next tick -- the exact bug this whole change removes. Surface it loudly; the
+            # caller still marks the day via last_digest_date, which keeps the repost away.
+            LOGGER.exception(
+                "Digest posted (message=%s) but its record could not be stored for guild=%s user=%s",
+                message.id, state.guild_id, state.user_id,
+            )
+        await self._purge_stale_digest_records(state, today_str)
+        return True
+
+    async def _purge_stale_digest_records(self, state: UserWorkspaceState, today_str: str) -> None:
+        """Drop digest bookkeeping for previous days so the table does not grow forever."""
+        try:
+            for rec in await self.store.list_embed_records(state.guild_id, state.user_id, DIGEST_KIND):
+                if rec.item_key != today_str:
+                    await self.store.delete_embed_record(state.guild_id, state.user_id, DIGEST_KIND, rec.item_key)
+        except Exception as exc:  # pragma: no cover - bookkeeping only
+            LOGGER.warning("Digest record purge failed for user=%s: %s", state.user_id, exc)
 
     # ─── Sync internals ───────────────────────────────────────────────────────
 
@@ -835,8 +986,32 @@ class SchulmanagerCog(commands.Cog):
         await self._process_letter_notifications(state, data.get("letters", []))
         await self._publish_forum(guild, state, data)
         await self._publish_dashboard(guild, state, data, reason=reason)
+        await self._refresh_digest(guild, state, data)
         await self.store.update_sync_status(state.guild_id, state.user_id, last_sync_ts=int(time.time()), last_error=None)
         return state
+
+    async def _refresh_digest(self, guild: discord.Guild, state: UserWorkspaceState, data: dict[str, Any]) -> None:
+        """Keep today's already-posted digest current, reusing this sync's payloads.
+
+        Never creates a digest -- that stays the digest loop's job, so nothing shows up
+        before discord_digest_time and a deleted digest stays deleted.
+
+        Runs inside _run_sync_iteration, which already holds the per-user lock, so it must
+        not take that lock itself.
+        """
+        if not self.settings.discord_digest_enabled:
+            return
+        if not await self.store.get_notification_pref(state.guild_id, state.user_id, "digest", default=True):
+            return
+        # _fetch_payloads degrades a failing endpoint to an empty list. Editing from that
+        # would silently blank out a digest that is already on screen, so leave it alone
+        # and refresh on the next sync that returns real data.
+        if self._data_looks_empty(data):
+            return
+        try:
+            await self._send_digest(guild, state, data=data, create=False)
+        except Exception as exc:  # pragma: no cover - digest must never break a sync
+            LOGGER.warning("Digest refresh failed for guild=%s user=%s: %s", state.guild_id, state.user_id, exc)
 
     async def _attempt_auto_relogin(self, *, guild: discord.Guild, state: UserWorkspaceState, reason: str, force_refresh: bool) -> bool:
         if not state.password:
